@@ -15,9 +15,21 @@ from hivision.utils import (
 import base64
 import numpy as np
 import cv2
+from starlette.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 creator = IDCreator()
+
+# 添加 CORS 中间件 解决跨域问题
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 允许的请求来源
+    allow_credentials=True,  # 允许携带 Cookie
+    allow_methods=[
+        "*"
+    ],  # 允许的请求方法，例如：GET, POST 等，也可以指定 ["GET", "POST"]
+    allow_headers=["*"],  # 允许的请求头，也可以指定具体的头部
+)
 
 
 # 将图像转换为Base64编码
@@ -25,7 +37,7 @@ def numpy_2_base64(img: np.ndarray):
     retval, buffer = cv2.imencode(".png", img)
     base64_image = base64.b64encode(buffer).decode("utf-8")
 
-    return base64_image
+    return "data:image/png;base64," + base64_image
 
 
 # 证件照智能制作接口
@@ -42,7 +54,6 @@ async def idphoto_inference(
     top_distance_max: float = 0.12,
     top_distance_min: float = 0.10,
 ):
-
     image_bytes = await input_image.read()
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -110,7 +121,7 @@ async def human_matting_inference(
 async def photo_add_background(
     input_image: UploadFile,
     color: str = Form("000000"),
-    kb: int = Form(50),
+    kb: int = Form(None),
     render: int = Form(0),
 ):
     render_choice = ["pure_color", "updown_gradient", "center_gradient"]
@@ -156,7 +167,7 @@ async def generate_layout_photos(
     input_image: UploadFile,
     height: int = Form(413),
     width: int = Form(295),
-    kb: int = Form(50),
+    kb: int = Form(None),
 ):
     # try:
     image_bytes = await input_image.read()
@@ -194,7 +205,7 @@ async def generate_layout_photos(
     return result_messgae
 
 
-# 透明图像添加纯色背景接口
+# 透明图像添加水印接口
 @app.post("/watermark")
 async def watermark(
     input_image: UploadFile,
@@ -204,6 +215,7 @@ async def watermark(
     angle: int = 30,
     color: str = "#000000",
     space: int = 25,
+    kb: int = Form(None),
 ):
     image_bytes = await input_image.read()
     nparr = np.frombuffer(image_bytes, np.uint8)
@@ -212,9 +224,15 @@ async def watermark(
     try:
         result_image = add_watermark(img, text, size, opacity, angle, color, space)
 
+        if kb:
+            result_image = cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR)
+            result_image_base64 = resize_image_to_kb_base64(result_image, int(kb))
+        else:
+            result_image_base64 = numpy_2_base64(result_image)
+
         result_messgae = {
             "status": True,
-            "image_base64": numpy_2_base64(result_image),
+            "image_base64": result_image_base64,
         }
     except Exception as e:
         result_messgae = {
@@ -250,6 +268,53 @@ async def set_kb(
         }
 
     return result_messgae
+
+
+# 证件照智能裁剪接口
+@app.post("/idphoto_crop")
+async def idphoto_crop_inference(
+    input_image: UploadFile,
+    height: int = Form(413),
+    width: int = Form(295),
+    face_detect_model: str = Form("mtcnn"),
+    hd: bool = Form(True),
+    head_measure_ratio: float = 0.2,
+    head_height_ratio: float = 0.45,
+    top_distance_max: float = 0.12,
+    top_distance_min: float = 0.10,
+):
+    image_bytes = await input_image.read()
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)  # 读取图像(4通道)
+
+    # ------------------- 选择抠图与人脸检测模型 -------------------
+    choose_handler(creator, face_detect_option=face_detect_model)
+
+    # 将字符串转为元组
+    size = (int(height), int(width))
+    try:
+        result = creator(
+            img,
+            size=size,
+            head_measure_ratio=head_measure_ratio,
+            head_height_ratio=head_height_ratio,
+            head_top_range=(top_distance_max, top_distance_min),
+            crop_only=True,
+        )
+    except FaceError:
+        result_message = {"status": False}
+    # 如果检测到人脸数量等于1, 则返回标准证和高清照结果（png 4通道图像）
+    else:
+        result_message = {
+            "status": True,
+            "image_base64_standard": numpy_2_base64(result.standard),
+        }
+
+        # 如果hd为True, 则增加高清照结果（png 4通道图像）
+        if hd:
+            result_message["image_base64_hd"] = numpy_2_base64(result.hd)
+
+    return result_message
 
 
 if __name__ == "__main__":
